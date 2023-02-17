@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import math
 import random
 
-_eps = 1**-5
+_eps = 1e-5
 dtype = torch.float
 print(f'dtype= {dtype}')
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -59,9 +59,8 @@ class Attention(nn.Module):
 class MHAttention(nn.Module):
     def __init__(self, dx, dz, dattn, dout, dmid, H):
         super().__init__()
-        assert dattn % H == 0, f'dattn={dattn} should be divisible by H={H}'
-        self.attention = nn.ModuleList([Attention(dx, dz, dattn // H, dattn // H) for _ in range(H)])
-        self.Wo = nn.Parameter(torch.randn((dout, dattn)))
+        self.attention = nn.ModuleList([Attention(dx, dz, dattn, dmid) for _ in range(H)])
+        self.Wo = nn.Parameter(torch.randn((dout, dattn * H)) / math.sqrt(dout))
         self.bo = nn.Parameter(torch.zeros((dout, 1)))
 
     def forward(self, X, Z, mask=None):
@@ -80,24 +79,21 @@ class MHAttention(nn.Module):
         Y = torch.cat(Y, dim=0)
         return self.Wo @ Y + self.bo
 
+
+################################################
+# Algorithm 6: EDTransformer
+################################################
 class Layer_norm(nn.Module):
     def __init__(self, de, beta=None):
         super().__init__()
-        self.lamb = torch.nn.Parameter(torch.randn((de, 1)) / math.sqrt(de))
-        self.beta = torch.nn.Parameter(torch.randn((de, 1)) / math.sqrt(de)) if beta is None else beta
+        self.lamb = torch.nn.Parameter(torch.ones((de, 1)))
+        self.beta = torch.nn.Parameter(torch.zeros((de, 1))) if beta is None else beta
     
     def forward(self, e):
-        std, m = torch.std_mean(e, dim=0, keepdim=True)
+        m = e.mean(dim=0, keepdim=True)
+        v = e.var(dim=0, keepdim=True)
         # add _eps to denominator for numerical stability
-        return ((e - m) / (std + _eps)) * self.lamb + self.beta
-
-class Unembedding(nn.Module):
-    def __init__(self, W):
-        super().__init__()
-        self.W = W
-
-    def forward(self, e):
-        return nn.functional.softmax(self.W.dot(e))
+        return ((e - m) / torch.sqrt(v + _eps)) * self.lamb + self.beta
        
 ################################################
 # Algorithm 8: EDTransformer
@@ -523,33 +519,33 @@ def EDInference(z, transformer):
     return x
 
 # run inference
-source, char2num_z, target, char2num_x = loadSeq2SeqDataset()
-z = 'go.'
-z = torch.tensor([57] + \
-    [char2num_z[achar] for achar in z] + \
-    [57 + 1])
-num2char_x = ['0'] * (len(char2num_x) + 2)
-for achar, num in char2num_x.items():
-    num2char_x[num] = achar
-num2char_x[57] = 'S'
-num2char_x[58] = 'E'
-# {num:achar for achar, num in char2num_x.items()}
-# print('char2num_x.items()', char2num_x.items())
-de = 512
-Wp = positional_embedding(de, max_len + 2)
-transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, We=None, Wp=Wp, Wu=None, dattn=128, dmid=128)
+# source, char2num_z, target, char2num_x = loadSeq2SeqDataset()
+# z = 'go.'
+# z = torch.tensor([57] + \
+#     [char2num_z[achar] for achar in z] + \
+#     [57 + 1])
+# num2char_x = ['0'] * (len(char2num_x) + 2)
+# for achar, num in char2num_x.items():
+#     num2char_x[num] = achar
+# num2char_x[57] = 'S'
+# num2char_x[58] = 'E'
+# # {num:achar for achar, num in char2num_x.items()}
+# # print('char2num_x.items()', char2num_x.items())
+# de = 512
+# Wp = positional_embedding(de, max_len + 2)
+# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, We=None, Wp=Wp, Wu=None, dattn=128, dmid=128)
 
-# # ntokens = ord('z') - ord('a') + 4
-# We = np.identity(len(vocabulary) + 4, dtype=np.float32)
-# Wu = np.linalg.inv(We)
-# Wu = torch.from_numpy(Wu)
-# Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
-# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
-transformer.load_state_dict(torch.load('EDTraining_model.pth'))
-transformer.eval()
-x = EDInference(z, transformer)
-# print('num2char_x', num2char_x)
-print(f'Text in Spanish: {str([num2char_x[n]  for n in x])}')
+# # # ntokens = ord('z') - ord('a') + 4
+# # We = np.identity(len(vocabulary) + 4, dtype=np.float32)
+# # Wu = np.linalg.inv(We)
+# # Wu = torch.from_numpy(Wu)
+# # Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
+# # transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
+# transformer.load_state_dict(torch.load('EDTraining_model.pth'))
+# transformer.eval()
+# x = EDInference(z, transformer)
+# # print('num2char_x', num2char_x)
+# print(f'Text in Spanish: {str([num2char_x[n]  for n in x])}')
 
 
 
