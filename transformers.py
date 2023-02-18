@@ -64,7 +64,7 @@ class MHAttention(nn.Module):
         self.bo = nn.Parameter(torch.zeros((dout, 1)))
 
     def forward(self, X, Z, mask=None):
-        '''
+        """
         Parameters:
             X: Primary (query) sequence.
             Z: Context sequence.
@@ -74,7 +74,7 @@ class MHAttention(nn.Module):
             token X[j]. 
         Output:
             tensor representation of X with Z as context.
-        '''
+        """
         Y = [attn(X, Z, mask) for attn in self.attention]
         Y = torch.cat(Y, dim=0)
         return self.Wo @ Y + self.bo
@@ -99,25 +99,24 @@ class Layer_norm(nn.Module):
 # Algorithm 8: EDTransformer
 ################################################
 class EDTransformer(nn.Module):
-    def __init__(self, Lenc, Ldec, H, de, dmlp, We, Wp, Wu, dattn, dmid):
-        '''
+    def __init__(self, Lenc, Ldec, H, de, dmlp, Nv, lmax, dattn, dmid):
+        """
         Parameters:
-            Lenc: Number of encoder (multi head) attention layers.
-            Ldec: Number of decoder (multi head) attention layers.
+            Lenc: Number of encoder multi head attention layers.
+            Ldec: Number of decoder multi head attention layers.
             H: Number of heads per attention layer, assumes same number for encoder and decoder.
             de: Embedding dimension in attention.
             dmlp: Number of units per MLP layer, applied after each attention layer.
-            We: Token embedding matrix.
-            Wp: Positional embbeding matrix.
+            Nv: Vocabulary size.
+            lmax: max length of sequence.
             Wu: Unembbeding matrix.
             dattn: number of units in attention layers.
             dmid: Number of output units per single attention layer in multi head attention layer. 
-        '''
+        """
         super().__init__()
 
-        self.We = torch.nn.Embedding(59, de)
-        #We
-        self.Wp = Wp
+        self.We = torch.nn.Embedding(Nv, de)
+        self.Wp = positional_embedding(de, lmax)
         self.Lenc = Lenc
         self.Ldec = Ldec
         self.encoder_MHeadAttentionLayers = nn.ModuleList()
@@ -135,7 +134,7 @@ class EDTransformer(nn.Module):
         self.Wmlps4 = nn.ParameterList()
         self.bmlps3 = nn.ParameterList()
         self.bmlps4 = nn.ParameterList()
-        self.Wu = nn.Parameter(torch.randn((59, de)) / math.sqrt(59)) # Wu
+        self.Wu = nn.Parameter(torch.randn((Nv, de)) / math.sqrt(Nv)) # 
         
         for _ in range(Lenc):
             self.encoder_MHeadAttentionLayers.append(MHAttention(de, de, dattn, de, dmid, H))
@@ -156,15 +155,11 @@ class EDTransformer(nn.Module):
             self.bmlps3.append(torch.nn.Parameter(torch.zeros((dmlp, 1))))
             self.bmlps4.append(torch.nn.Parameter(torch.zeros((de, 1))))
         self.relu=nn.ReLU()
-        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((59, 59))) > 0)
+        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax))) > 0)
 
     def forward(self, x, z):
         lz = z.shape[0]
-        # e = [torch.from_numpy(self.We[:, z[t]] + self.Wp[:, t].reshape(-1, 1)) for t in range(lz)]
-        # print('self.We(z).transpose(1,0) shape', self.We(z).transpose(1,0).shape)
-        # print('self.Wp[:, :lz].transpose(1,0) shape', self.Wp[:, :lz].transpose(1,0).shape)
         Z = self.We(z).transpose(1,0) + self.Wp[:, :lz]
-        # Z = torch.cat(e, dim=1) # Z.shape = (de, lz)
         for l in range(self.Lenc):
             Z = Z + self.encoder_MHeadAttentionLayers[l](Z, Z, mask=None)
             Z = self.encoder_first_layer_norms[l](Z)
@@ -173,7 +168,6 @@ class EDTransformer(nn.Module):
 
         lx = x.shape[0]
         X = self.We(x).transpose(1,0) + self.Wp[:, :lx]
-        # unidirectional_attention_mask = torch.triu(torch.ones((X.shape[1], X.shape[1]))) > 0
         for l in range(self.Ldec):
             X = X + self.decoder_MHeadAttentionLayers[l](X, X, mask=self.unidirectional_attention_mask[:lx, :lx])
             X = self.decoder_first_layer_norms[l](X)
@@ -189,7 +183,7 @@ class EDTransformer(nn.Module):
 ################################################
 class ETransformer(nn.Module):
     def __init__(self, L, H, de, dmlp, df, We, Wp, Wu, dattn, dmid):
-        '''
+        """
         Parameters:
             L: Number of (multi head) attention layers.
             H: Number of heads per attention layer.
@@ -201,7 +195,7 @@ class ETransformer(nn.Module):
             Wu: Unembbeding matrix.
             dattn: number of units in attention layers.
             dmid: Number of output units per single attention layer in multi head attention layer. 
-        '''
+        """
         super().__init__()
         self.We = We
         self.Wp = Wp
@@ -315,9 +309,8 @@ def loadSeq2SeqDataset(file_path='spa-eng/spa.txt'):
     Loads dataset with language2language sentences 
     returns:
         (z, x): list of tensors with source and target tensor sentences, respectively
-        each language has i
-    """
 
+    """
     vocab_z, vocab_x = set(), set()
     z, x = [], []
     with open(file_path) as f:
@@ -329,44 +322,22 @@ def loadSeq2SeqDataset(file_path='spa-eng/spa.txt'):
             vocab_z.update(parts[0])
             x.append(parts[1])
             vocab_x.update(parts[1])
-    char2num_z = {char:num for num, char in enumerate(sorted(vocab_z))}
-    char2num_x = {char:num for num, char in enumerate(sorted(vocab_x))}
-    print('Vocab z', vocab_z, 'num elem.', len(vocab_z))
-    print('Vocab x', vocab_x, 'num elem.', len(vocab_x))
-    # TODO: change this to max vocab value NOT MAX_LEN
-    next_char_id = max(len(vocab_x), len(vocab_z))
-    start_token = next_char_id
-    end_token = next_char_id + 1
-    for i in range(3):
-        print(z[i], x[i])
 
-    z = [torch.tensor([start_token] + [char2num_z[char] for char in line] + [end_token]) for line in z]
-    x = [torch.tensor([start_token] + [char2num_x[char] for char in line] + [end_token]) for line in x]
-    return z[:1], char2num_z, x[:1], char2num_x
+    all_chars = vocab_x.union(vocab_z)
+    char2num = {char:num for num, char in enumerate(sorted(all_chars))}
+    start_token = len(all_chars)
+    end_token = len(all_chars) + 1
+    char2num['S'] = start_token
+    char2num['E'] = end_token
 
-            
+    z = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in z]
+    x = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in x]
+    return z, x, char2num
 
-    # eng2span = []
-    # max_len = 0
-    # max_ord = 0
-    # min_ord = 1000000
-    # vocabulary = {}
-    # with open() as f:
-    #     for line in tqdm(f):
-    #         line = line.strip().lower()
-    #         parts = line.split('\t')            
-    #         eng2span.append((char2num_seq(parts[0], vocabulary), 
-    #             char2num_seq(parts[1], vocabulary)))
-    #         max_len = max(len(eng2span[-1][0]), len(eng2span[-1][1]), max_len)
-    #         max_ord = max([max_ord] + eng2span[-1][0] + eng2span[-1][1])
-    #         min_ord = min([min_ord] + eng2span[-1][0] + eng2span[-1][1])
-    # # print(f'Num examples: len(z)={len(z)}, len(x)={len(x)}')
-    # return eng2span, max_len, max_ord, min_ord, vocabulary
 
 ################################################
 # Algorithm 12
 ################################################
-
 def ETraining(data, nEpochs=10, lrate=1e-3, p_mask=0.5, saved_model_path='ETraining_model.pth'):
     ntokens = ord('z') - ord('a') + 4
     We = np.identity(ntokens, dtype=np.float32)
@@ -416,136 +387,88 @@ def run_ETraining():
 
 
 
-# eng2span, max_len, max_ord, min_ord, vocabulary = loadSeq2SeqDataset()
-# print('#### max len', max_len)
-# print('#### max ord', max_ord)
-# print('#### min ord', min_ord)
-# print('#### num vocabulary keys', len(vocabulary))
-# print('#### vocabulary', vocabulary)
-
-# mask_token = len(vocabulary) + 1
-# start_token = len(vocabulary) + 2
-# end_token = len(vocabulary) + 3
-
-# vocabulary_num2char = {val:key for key, val in vocabulary.items()}
-# vocabulary_num2char[mask_token] = 'A'
-# vocabulary_num2char[start_token] = 'B'
-# vocabulary_num2char[end_token] = 'C'
-
-# print('### data', data[:2])
-
-# source, char2num_z, target, char2num_x = loadSeq2SeqDataset()
-# print('source len', len(source))
-
-
 ################################################
 # Algorithm 11
 ################################################
-def EDTraining(nEpochs=10, lrate=1e-4, saved_model_path='EDTraining_model.pth', batch_size=8):
-    source, char2num_z, target, char2num_x = loadSeq2SeqDataset()
-    print('source len', len(source))
-    de = 512
-    n_different_characters = 59
-    We = torch.nn.Embedding(n_different_characters, de) #torch.randn((de, len(vocabulary) + 4)) 
-    Wu = torch.randn((n_different_characters, de)) # torch.nn.Embedding((max_len + 2, de)) # torch.randn((de, len(vocabulary) + 4)) # np.linalg.inv(We)
-    Wp = positional_embedding(de, max_len + 2)
-
-    transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, We=We, Wp=Wp, Wu=Wu, dattn=128, dmid=128)
-    # for param in transformer.parameters():
-    #     print('*** param', type(param.data), param.size())
-    print('Network: ', transformer)
+def EDTraining(nEpochs=10, lrate=1e-4, saved_model_path='EDTraining_model.pth'):
+    source, target, char2num = loadSeq2SeqDataset()
+    print('*** dataset size:', len(source))
+    print('*** vocabulary size:', len(char2num))
+    
+    transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
+    # print('Network: ', transformer)
     for epoch in tqdm(range(nEpochs)):
-        # for data_idx, source_target in tqdm(enumerate(zip(source, target))):
-        for data_idx, source_target in enumerate(zip(source, target)):
+        for data_idx, source_target in tqdm(enumerate(zip(source, target))):
+        # for data_idx, source_target in enumerate(zip(source, target)):
             z = source_target[0]
             x = source_target[1]     
             P = transformer(x, z)
 
             loss = -torch.mean(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
             # print(f'Loss value at step {data_idx}: {loss.item()}')
-            # if data_idx % 1000 == 0:
-                # print('### P ', P)
-                # print('### max P ', max(P[:, 2]))
-                # print(f' Sequences x={x}, z ={z}')
-                # print(f' Sequences length x={x.shape[0]}, z ={z.shape[0]}')
-                # print(f'Loss value at step {data_idx}: {loss.item()}')
-                # print(f'Saving Model after epoch {epoch + 1}')
-                # print('P[x[1:x.shape[0]-1], range(x.shape[0] - 2)]', P[x[1:x.shape[0]-1], range(x.shape[0] - 2)])
-                # torch.save(transformer.state_dict(), f'{saved_model_path}_epoch_{epoch}')
-                # print(zx)
+            if data_idx % 500 == 0:
+                print(f'Loss value at step {data_idx}: {loss.item()}')
+                print('P[x[1:x.shape[0]-1], range(x.shape[0] - 2)]', P[x[1:x.shape[0]-1], range(x.shape[0] - 2)])
+                print(f'Saving Model after epoch {epoch + 1}')
+                torch.save(transformer.state_dict(), f'{saved_model_path}_epoch_{epoch}')
             
             loss.backward()
             with torch.no_grad():
                 for param in transformer.parameters():
                     param -= lrate * param.grad
                 transformer.zero_grad()
-        # np.random.shuffle(data)
         indx = list(range(len(source)))
         random.shuffle(indx)
         source = [source[i] for i in indx]
         target = [target[i] for i in indx]
 
-        # print(f'Saving Model after epoch {epoch + 1}')
         torch.save(transformer.state_dict(), saved_model_path)
 
 # Wp = positional_embedding(512, 2048).astype(dtype=np.float32)
 # visualize_pos_embedding(Wp)
 
 
-# EDTraining(lrate=1e-2, nEpochs=10000)
+EDTraining(lrate=1e-3, nEpochs=3)
 #TODO: fix indexing issue and train with mini-batch>1
 
 ################################################
 # Algorithm 15
 ################################################
-def EDInference(z, transformer):
-    # We = np.identity(len(vocabulary) + 4, dtype=np.float32)
-    # Wu = np.linalg.inv(We)
-    x = torch.tensor([57], dtype=torch.int)
-    y = torch.tensor([57])
-    end_token = 58
+def EDInference(z, transformer, char2num):
+    x = torch.tensor([char2num['S']], dtype=torch.int)
+    y = torch.tensor([char2num['S']])
+    end_token = char2num['E']
     t = 1
     while y[0] != end_token and len(x) < max_len:
         P = transformer(x, z)
         p = P[:, x.shape[0] - 1]
-        # print('x.shape[0]', x.shape[0])
-        # print(p)
-        # print(P)
-        y = torch.tensor([np.random.choice(59, p=p.detach().numpy() ** (1 / t))])
-        # print('Chosen ', vocabulary_num2char[y])
-        # print('***** y', y)
+        y = torch.tensor([np.random.choice(len(char2num), p=p.detach().numpy() ** (1 / t))])
         x = torch.cat([x, y])
-    print('x', x)
     return x
 
 # run inference
-# source, char2num_z, target, char2num_x = loadSeq2SeqDataset()
-# z = 'go.'
-# z = torch.tensor([57] + \
-#     [char2num_z[achar] for achar in z] + \
-#     [57 + 1])
-# num2char_x = ['0'] * (len(char2num_x) + 2)
-# for achar, num in char2num_x.items():
-#     num2char_x[num] = achar
-# num2char_x[57] = 'S'
-# num2char_x[58] = 'E'
-# # {num:achar for achar, num in char2num_x.items()}
-# # print('char2num_x.items()', char2num_x.items())
-# de = 512
-# Wp = positional_embedding(de, max_len + 2)
-# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, We=None, Wp=Wp, Wu=None, dattn=128, dmid=128)
+_, _, char2num = loadSeq2SeqDataset()
+z = 'i agree.'
+z = torch.tensor([char2num['S']] + \
+    [char2num[achar] for achar in z] + \
+    [char2num['E']])
+num2char = ['0'] * (len(char2num))
+for achar, num in char2num.items():
+    num2char[num] = achar
 
-# # # ntokens = ord('z') - ord('a') + 4
-# # We = np.identity(len(vocabulary) + 4, dtype=np.float32)
-# # Wu = np.linalg.inv(We)
-# # Wu = torch.from_numpy(Wu)
-# # Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
-# # transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
-# transformer.load_state_dict(torch.load('EDTraining_model.pth'))
-# transformer.eval()
-# x = EDInference(z, transformer)
-# # print('num2char_x', num2char_x)
-# print(f'Text in Spanish: {str([num2char_x[n]  for n in x])}')
+transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
+
+# # ntokens = ord('z') - ord('a') + 4
+# We = np.identity(len(vocabulary) + 4, dtype=np.float32)
+# Wu = np.linalg.inv(We)
+# Wu = torch.from_numpy(Wu)
+# Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
+# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
+transformer.load_state_dict(torch.load('EDTraining_model.pth'))
+transformer.eval()
+x = EDInference(z, transformer, char2num)
+# print('num2char_x', num2char_x)
+print(f'Text in Spanish: {str([num2char[n]  for n in x])}')
 
 
 
