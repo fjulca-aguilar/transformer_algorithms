@@ -8,9 +8,10 @@ import random
 
 _eps = 1e-5
 dtype = torch.float
-print(f'dtype= {dtype}')
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 max_len = 20
+START_CHAR = 'S'
+END_CHAR = 'E'
 
 ################################################
 # Algorithm 4
@@ -182,7 +183,7 @@ class EDTransformer(nn.Module):
 # Algorithm 9: ETransformer
 ################################################
 class ETransformer(nn.Module):
-    def __init__(self, L, H, de, dmlp, df, We, Wp, Wu, dattn, dmid):
+    def __init__(self, L, H, de, dmlp, df, Nv, lmax, dattn, dmid):
         """
         Parameters:
             L: Number of (multi head) attention layers.
@@ -197,42 +198,36 @@ class ETransformer(nn.Module):
             dmid: Number of output units per single attention layer in multi head attention layer. 
         """
         super().__init__()
-        self.We = We
-        self.Wp = Wp
+        self.We = torch.nn.Embedding(Nv, de)
+        self.Wp = positional_embedding(de, lmax)
         self.L = L
         self.mHeadAttentionLayers = nn.ModuleList()
         self.first_layer_norms = nn.ModuleList()
         self.second_layer_norms = nn.ModuleList()
-        self.Wmlps1 = nn.ModuleList()
-        self.Wmlps2 = nn.ModuleList()
-        self.bmlps1 = nn.ModuleList()
-        self.bmlps2 = nn.ModuleList()
-        self.Wf = torch.nn.Parameter(torch.randn(df, de))
-        self.bf = torch.nn.Parameter(torch.randn((df, 1)))
-        self.final_layer_norm = Layer_norm()
-        self.Wu = Wu
+        self.Wmlps1 = nn.ParameterList()
+        self.Wmlps2 = nn.ParameterList()
+        self.bmlps1 = nn.ParameterList()
+        self.bmlps2 = nn.ParameterList()
+        self.Wf = torch.nn.Parameter(torch.randn(df, de) / math.sqrt(df))
+        self.bf = torch.nn.Parameter(torch.zeros((df, 1)) / math.sqrt(df))
+        self.final_layer_norm = Layer_norm(df)
+        self.Wu = nn.Parameter(torch.randn((Nv, df)) / math.sqrt(Nv))
         self.gelu = nn.GELU()
         
         for _ in range(L):
             self.mHeadAttentionLayers.append(MHAttention(de, de, dattn, de, dmid, H))
-            self.first_layer_norms.append(Layer_norm())
-            self.second_layer_norms.append(Layer_norm())
-            self.Wmlps1.append(torch.nn.Parameter(torch.randn((dmlp, de))))
-            self.Wmlps2.append(torch.nn.Parameter(torch.randn((de, dmlp))))
-            self.bmlps1.append(torch.nn.Parameter(torch.randn((dmlp, 1))))
-            self.bmlps2.append(torch.nn.Parameter(torch.randn((de, 1))))
+            self.first_layer_norms.append(Layer_norm(de))
+            self.second_layer_norms.append(Layer_norm(de))
+            self.Wmlps1.append(torch.nn.Parameter(torch.randn((dmlp, de)) / math.sqrt(dmlp)))
+            self.Wmlps2.append(torch.nn.Parameter(torch.randn((de, dmlp)) / math.sqrt(de)))
+            self.bmlps1.append(torch.nn.Parameter(torch.zeros((dmlp, 1))))
+            self.bmlps2.append(torch.nn.Parameter(torch.zeros((de, 1))))
 
     def forward(self, x):
-        # x = tensor of shape (lx) with token IDs
-        # assert len(x.shape) == 2, print(f'Wrong input dimension: {len(x.shape)}, expected 2')
-        lx = len(x)
-        e = [torch.from_numpy(self.We[:, x[t]] + self.Wp[:, t].reshape(-1, 1)) for t in range(lx)]
-        X = torch.cat(e, dim=1) # X.shape = (dx, lx)
-        #TODO: might need to make X.shape = (dx, lmax) to match fixed matrices in m. head attention layers
-        # or do it before calling this function. Check that padding is not used during learning.
-        mask = None # torch.tensor([True] * X.shape[0] for _ in range(X.shape[0]))
+        lx = x.shape[0]
+        X = self.We(x).transpose(1,0) + self.Wp[:, :lx]
         for l in range(self.L):
-            X = X + self.mHeadAttentionLayers[l](X, X, mask=mask)
+            X = X + self.mHeadAttentionLayers[l](X, X, mask=None)
             X = self.first_layer_norms[l](X)
             X = X + self.Wmlps2[l] @ self.gelu(self.Wmlps1[l] @ X + self.bmlps1[l]) + self.bmlps2[l]
             X = self.second_layer_norms[l](X)
@@ -265,45 +260,9 @@ def visualize_pos_embedding(Wp):
     plt.colorbar()
     plt.show()
 
-
-def char2num(c):
-    return ord(c)
-    # return ord(c) - ord('a')
-
-def num2char(num):
-    return chr(num + ord('a'))
-
-def num_seq2char_seq(num_seq):
-    return [num2char(num) for num in num_seq]
-
-# mask_token = char2num('z') + 1
-# start_token = char2num('z') + 2
-# end_token = char2num('z') + 3
-
 ################################################
 # Load dataset
 ################################################
-def load_dataset():
-    data = []
-    with open('names.txt') as f:
-        for line in f:
-            line = line.strip().lower()
-            data.append([start_token] + 
-            [char2num(c) for c in line if ord('a') <= ord(c) <= ord('z')] +
-            [end_token])
-    print(f'Num data elements: {len(data)}')    
-    print(f'First 10 elements {data[:10]}')
-    return data
-
-def char2num_seq(char_seq, vocabulary):
-    num_seq = []
-    for c in char_seq:
-        if c not in vocabulary:
-            vocabulary[c] = len(vocabulary) + 1
-        num_seq.append(vocabulary[c])  
-    return num_seq          
-
-
 def loadSeq2SeqDataset(file_path='spa-eng/spa.txt'):
     """
     Loads dataset with language2language sentences 
@@ -327,64 +286,89 @@ def loadSeq2SeqDataset(file_path='spa-eng/spa.txt'):
     char2num = {char:num for num, char in enumerate(sorted(all_chars))}
     start_token = len(all_chars)
     end_token = len(all_chars) + 1
-    char2num['S'] = start_token
-    char2num['E'] = end_token
+    char2num[START_CHAR] = start_token
+    char2num[END_CHAR] = end_token
 
     z = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in z]
     x = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in x]
     return z, x, char2num
 
+def load_decoder_dataset(file_path='crime_and_punishment.txt'):
+    """
+    Loads decoder only dataset.
+    returns:
+        (x): list of tensors with sentence examples.
+
+    """    
+    x = []
+    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+        text = f.read().lower()
+    all_chars = set(text)
+    char2num = {char:num for num, char in enumerate(sorted(all_chars))}
+    dataset_size = 1000
+
+    start_ix = torch.randint(len(text) - max_len, (dataset_size,))
+    x = [text[ix:ix+max_len] for ix in start_ix]
+    start_token = len(all_chars)
+    end_token = len(all_chars) + 1
+    char2num[START_CHAR] = start_token
+    char2num[END_CHAR] = end_token
+
+    x = [torch.tensor([start_token] + [char2num[char] for char in sample] + [end_token]) for sample in x]
+    return x, char2num
 
 ################################################
-# Algorithm 12
+# Algorithm 10
 ################################################
-def ETraining(data, nEpochs=10, lrate=1e-3, p_mask=0.5, saved_model_path='ETraining_model.pth'):
-    ntokens = ord('z') - ord('a') + 4
-    We = np.identity(ntokens, dtype=np.float32)
-    Wu = np.linalg.inv(We)
-    max_lx = 1
-    for x in data:
-        if len(x) > max_lx:
-            max_lx = len(x)
-    Wp = positional_embedding(We.shape[0], max_lx).astype(dtype=np.float32)
-    # print(f'Positional embedding {We[:10]}')
-    # We = torch.from_numpy(We)
-    Wu = torch.from_numpy(Wu)
-    # Wp = torch.from_numpy(Wp)
-    # L, H, de, dmlp, df, We, Wp, Wu, dattn, dmid
-    eTransformer = ETransformer(4, 2, We.shape[0], We.shape[0], 20, We, Wp, Wu, 20, 20)
-    
-    for epoch in range(nEpochs):
-        for data_idx, x in tqdm(enumerate(data)):
-            mask_indices =  np.random.binomial(1, p_mask, len(x)).astype(int)
-            mask_indices = [idx for idx, mask_it in zip(range(len(x)), mask_indices) if mask_it == 1]
-            # print(mask_indices)
-            # print(f'mask_indices type: {mask_indices.dtype}')
-            masked_x = x.copy()
-            for mask_pos in mask_indices:
-                masked_x[mask_pos] = mask_token
-            # masked_x[mask_indices] = mask_token
-            masked_x = [start_token] + masked_x + [end_token]
-            # with torch.autograd.set_detect_anomaly(True):
-            P = eTransformer(masked_x)
-            x = torch.tensor(x)
-            loss = -torch.sum(torch.log(P[x[mask_indices], mask_indices]))
-            if data_idx % 100 == 0:
-                print(f'Loss value at step {data_idx}: {loss.item()}')
-            eTransformer.zero_grad()
-            loss.backward()
-            with torch.no_grad():
-                for param in eTransformer.parameters():
-                    param -= lrate * param.grad
-        np.random.shuffle(data)
-        print(f'Saving Model after epoch {epoch + 1}')
-        torch.save(eTransformer.state_dict(), saved_model_path)
-            
-def run_ETraining():
-    data = load_dataset()[:1000]
-    # print(np.random.binomial(1, 0.5, 10))
-    ETraining(data)
+class DTransformer(nn.Module):
+    def __init__(self, L, H, de, dmlp, Nv, lmax, dattn, dmid):
+        """
+        Parameters:
+            L: Number of encoder multi head attention layers.
+            H: Number of heads per attention layer, assumes same number for encoder and decoder.
+            de: Embedding dimension in attention.
+            dmlp: Number of units per MLP layer, applied after each attention layer.
+            Nv: Vocabulary size.
+            lmax: max length of sequence.
+            dattn: number of units in attention layers.
+            dmid: Number of output units per single attention layer in multi head attention layer. 
+        """
+        super().__init__()
 
+        self.We = torch.nn.Embedding(Nv, de)
+        self.Wp = positional_embedding(de, lmax)
+        self.L = L
+        self.Wmlps1 = nn.ParameterList()
+        self.Wmlps2 = nn.ParameterList()
+        self.bmlps1 = nn.ParameterList()
+        self.bmlps2 = nn.ParameterList()
+        self.mHeadAttentionLayers = nn.ModuleList()
+        self.first_layer_norms = nn.ModuleList()
+        self.second_layer_norms = nn.ModuleList()
+        self.third_layer_norm = Layer_norm(de)
+        self.Wu = nn.Parameter(torch.randn((Nv, de)) / math.sqrt(Nv)) # 
+        
+        for _ in range(L):
+            self.mHeadAttentionLayers.append(MHAttention(de, de, dattn, de, dmid, H))
+            self.first_layer_norms.append(Layer_norm(de))
+            self.second_layer_norms.append(Layer_norm(de))
+            self.Wmlps1.append(torch.nn.Parameter(torch.randn((dmlp, de)) / math.sqrt(dmlp)))
+            self.Wmlps2.append(torch.nn.Parameter(torch.randn((de, dmlp)) / math.sqrt(de)))
+            self.bmlps1.append(torch.nn.Parameter(torch.zeros((dmlp, 1))))
+            self.bmlps2.append(torch.nn.Parameter(torch.zeros((de, 1))))
+        self.gelu=nn.GELU()
+        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax))) > 0)
+
+    def forward(self, x):
+        lx = x.shape[0]
+        X = self.We(x).transpose(1,0) + self.Wp[:, :lx]
+        for l in range(self.L):
+            X = self.first_layer_norms[l](X)
+            X = X + self.mHeadAttentionLayers[l](X, X, self.unidirectional_attention_mask[:lx, :lx])
+            X = self.second_layer_norms[l](X)
+            X = X + self.Wmlps2[l] @ self.gelu(self.Wmlps1[l] @ X + self.bmlps1[l]) + self.bmlps2[l]
+        X = self.third_layer_norm(X)
+        return nn.functional.softmax(self.Wu @ X, dim=0)
 
 
 ################################################
@@ -424,12 +408,85 @@ def EDTraining(nEpochs=10, lrate=1e-4, saved_model_path='EDTraining_model.pth'):
 
         torch.save(transformer.state_dict(), saved_model_path)
 
+################################################
+# Algorithm 12
+################################################
+def ETraining(nEpochs=10, lrate=1e-3, p_mask=0.5, saved_model_path='ETraining_model.pth'):
+    data, char2num = load_decoder_dataset()
+    print('*** dataset size:', len(data))
+    print('*** vocabulary size:', len(char2num))
+    eTransformer = ETransformer(L=2, H=2, de=512, dmlp=2048, df=128, Nv=len(char2num) + 1, lmax=max_len + 2, dattn=128, dmid=128)
+    mask_token = len(char2num)
+    for epoch in range(nEpochs):
+        for data_idx, x in tqdm(enumerate(data)):
+            mask_indices =  np.random.binomial(1, p_mask, x.shape[0])
+            mask_indices = np.where(mask_indices)
+            masked_x = x.clone().detach()
+            masked_x[mask_indices] = mask_token
+            P = eTransformer(masked_x)
+            loss = -torch.mean(torch.log(P[x[mask_indices], mask_indices]))
+            if data_idx % 500 == 0:
+                print(f'Loss value at step {data_idx}: {loss.item()}')            
+            loss.backward()
+            with torch.no_grad():
+                for param in eTransformer.parameters():
+                    param -= lrate * param.grad
+                eTransformer.zero_grad()
+        np.random.shuffle(data)
+        print(f'Saving Model after epoch {epoch + 1}')
+        torch.save(eTransformer.state_dict(), saved_model_path)
+
+ETraining(lrate=1e-3, nEpochs=2)
+
+
+################################################
+# Algorithm 13
+################################################
+def DTraining(nEpochs=10, lrate=1e-4, saved_model_path='DTraining_model.pth'):
+    data, char2num = load_decoder_dataset()
+    print('*** dataset size:', len(data))
+    print('*** vocabulary size:', len(char2num))
+    # L, H, de, dmlp, Nv, lmax, dattn, dmid):
+    # TODO: check if I need start and end characters
+    
+    transformer = DTransformer(L=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
+
+    for epoch in tqdm(range(nEpochs)):
+        for data_idx, x in tqdm(enumerate(data)):     
+            P = transformer(x)
+            loss = -torch.mean(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
+            if data_idx % 500 == 0:
+                print(f'Loss value at step {data_idx}: {loss.item()}')
+                print('P[x[1:x.shape[0]-1], range(x.shape[0] - 2)]', P[x[1:x.shape[0]-1], range(x.shape[0] - 2)])
+                print(f'Saving Model after epoch {epoch + 1}')
+                torch.save(transformer.state_dict(), f'{saved_model_path}_epoch_{epoch}')            
+            loss.backward()
+            with torch.no_grad():
+                for param in transformer.parameters():
+                    param -= lrate * param.grad
+                transformer.zero_grad()
+        random.shuffle(data)      
+        torch.save(transformer.state_dict(), saved_model_path)
+
+# DTraining(lrate=1e-3, nEpochs=2)
 # Wp = positional_embedding(512, 2048).astype(dtype=np.float32)
 # visualize_pos_embedding(Wp)
 
 
-EDTraining(lrate=1e-3, nEpochs=3)
-#TODO: fix indexing issue and train with mini-batch>1
+# EDTraining(lrate=1e-3, nEpochs=3)
+###############################################
+# Algorithm 14
+###############################################
+def DInference(x, lgen, transformer, char2num):
+    l = x.shape[0]
+    y = torch.tensor([char2num['S']])
+    t = 1
+    for i in range(lgen):
+        P = transformer(x)
+        p = P[:, l + i - 1]
+        y = torch.tensor([np.random.choice(len(char2num), p=p.detach().numpy() ** (1 / t))])
+        x = torch.cat([x, y])
+    return x[l:]
 
 ################################################
 # Algorithm 15
@@ -446,30 +503,50 @@ def EDInference(z, transformer, char2num):
         x = torch.cat([x, y])
     return x
 
-# run inference
-_, _, char2num = loadSeq2SeqDataset()
-z = 'i agree.'
-z = torch.tensor([char2num['S']] + \
-    [char2num[achar] for achar in z] + \
-    [char2num['E']])
-num2char = ['0'] * (len(char2num))
-for achar, num in char2num.items():
-    num2char[num] = achar
+# run EDInference
+# _, _, char2num = loadSeq2SeqDataset()
+# z = 'i agree.'
+# z = torch.tensor([char2num['S']] + \
+#     [char2num[achar] for achar in z] + \
+#     [char2num['E']])
+# num2char = ['0'] * (len(char2num))
+# for achar, num in char2num.items():
+#     num2char[num] = achar
 
-transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
+# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
 
-# # ntokens = ord('z') - ord('a') + 4
-# We = np.identity(len(vocabulary) + 4, dtype=np.float32)
-# Wu = np.linalg.inv(We)
-# Wu = torch.from_numpy(Wu)
-# Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
-# transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
-transformer.load_state_dict(torch.load('EDTraining_model.pth'))
-transformer.eval()
-x = EDInference(z, transformer, char2num)
-# print('num2char_x', num2char_x)
-print(f'Text in Spanish: {str([num2char[n]  for n in x])}')
+# # # ntokens = ord('z') - ord('a') + 4
+# # We = np.identity(len(vocabulary) + 4, dtype=np.float32)
+# # Wu = np.linalg.inv(We)
+# # Wu = torch.from_numpy(Wu)
+# # Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
+# # transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
+# transformer.load_state_dict(torch.load('EDTraining_model.pth'))
+# transformer.eval()
+# x = EDInference(z, transformer, char2num)
+# # print('num2char_x', num2char_x)
+# print(f'Text in Spanish: {str([num2char[n]  for n in x])}')
 
+# run DInference
+# _, char2num = load_decoder_dataset()
+# x = '' # 'he had'
+# x = torch.tensor([char2num[START_CHAR]] + \
+#     [char2num[achar] for achar in x])
+# num2char = ['0'] * (len(char2num))
+# for achar, num in char2num.items():
+#     num2char[num] = achar
 
+# transformer = DTransformer(L=2, H=2, de=512, dmlp=2048, Nv=len(char2num), lmax=max_len + 2, dattn=128, dmid=128)
 
+# # # ntokens = ord('z') - ord('a') + 4
+# # We = np.identity(len(vocabulary) + 4, dtype=np.float32)
+# # Wu = np.linalg.inv(We)
+# # Wu = torch.from_numpy(Wu)
+# # Wp = positional_embedding(We.shape[0], max_len).astype(dtype=np.float32)
+# # transformer = EDTransformer(Lenc=2, Ldec=2, H=2, de=We.shape[0], dmlp=We.shape[0], df=20, We=We, Wp=Wp, Wu=Wu, dattn=20, dmid=20)
+# transformer.load_state_dict(torch.load('DTraining_model.pth_epoch_1'))
+# transformer.eval()
+# x = DInference(x, 20, transformer, char2num)
+# # print('num2char_x', num2char_x)
+# print(f"Book text: {''.join([num2char[n]  for n in x])}")
 
