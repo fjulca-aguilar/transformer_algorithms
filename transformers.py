@@ -5,14 +5,11 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 import math
 import random
+from torch.utils.tensorboard import SummaryWriter
 
 _eps = 1e-5
 dtype = torch.float
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-max_len = 20
-bos_char = 'S'
-eos_char = 'E'
-mask_char = 'M'
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 ################################################
 # Algorithm 4
@@ -47,10 +44,8 @@ class Attention(nn.Module):
         
         score = k.T @ q # lz x lx        
         if mask is not None:
-            assert mask.shape[0] == Z.shape[1] and mask.shape[1] == X.shape[1], \
-                    f"Mask dimensions should be ({Z.shape[1]}, {X.shape[1]})"
             inf = 1000
-            score = score.masked_fill(~mask, -inf)
+            score = score.masked_fill(mask==0, -inf)
 
         return v @ self.softmax(score / self.dattn_sqrt) # dout x lx
 
@@ -155,7 +150,7 @@ class EDTransformer(nn.Module):
             self.bmlps3.append(torch.nn.Parameter(torch.zeros((dmlp, 1), dtype=dtype)))
             self.bmlps4.append(torch.nn.Parameter(torch.zeros((de, 1), dtype=dtype)))
         self.relu=nn.ReLU()
-        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax))) > 0)
+        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax))))
 
     def forward(self, x, z):
         lz = z.shape[0]
@@ -250,7 +245,7 @@ def positional_embedding(de, lmax):
     Wp = torch.zeros((de, lmax), dtype=dtype)
     Wp[1::2, :] = torch.sin(angles)
     Wp[::2, :] = torch.cos(angles)
-    return Wp.to(device)
+    return Wp
 
 def visualize_pos_embedding(Wp):
     plt.pcolormesh(Wp, cmap='RdBu')
@@ -258,70 +253,6 @@ def visualize_pos_embedding(Wp):
     plt.xlabel('Position')
     plt.colorbar()
     plt.show()
-
-################################################
-# Load dataset
-################################################
-def load_translation_dataset(file_path='spa-eng/spa.txt'):
-    """
-    Loads dataset with language2language sentences 
-    returns:
-        (z, x): list of tensors with source and target tensor sentences, respectively
-
-    """
-    vocab_z, vocab_x = set(), set()
-    z, x = [], []
-    with open(file_path) as f:
-        for line in tqdm(f):
-            parts = line.strip().lower().split('\t')
-            # (max_len - 2) to account for begin and end of sequence tokens
-            if len(parts[0]) > (max_len - 2) or len(parts[1]) > (max_len - 2):
-                continue
-            z.append(parts[0])
-            vocab_z.update(parts[0])
-            x.append(parts[1])
-            vocab_x.update(parts[1])
-
-    all_chars = vocab_x.union(vocab_z)
-    char2num = {char:num for num, char in enumerate(sorted(all_chars))}
-    start_token = len(all_chars)
-    end_token = len(all_chars) + 1
-    char2num[bos_char] = start_token
-    char2num[eos_char] = end_token
-
-    z = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in z]
-    x = [torch.tensor([start_token] + [char2num[char] for char in line] + [end_token]) for line in x]
-    print('*** dataset size:', len(x))
-    print('*** vocabulary size:', len(char2num))
-    return z, x, char2num
-
-def load_book_dataset(file_path='crime_and_punishment.txt'):
-    """
-    Loads decoder only dataset.
-    returns:
-        (x): list of tensors with sentence examples.
-
-    """    
-    x = []
-    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-        text = f.read().lower()
-    all_chars = set(text)
-    char2num = {char:num for num, char in enumerate(sorted(all_chars))}
-    dataset_size = 10000
-
-    # use max_len - 2 to account for start and end token
-    start_ix = torch.randint(len(text) - (max_len - 2), (dataset_size,))
-    x = [text[ix:ix+(max_len - 2)] for ix in start_ix]
-    start_token = len(all_chars)
-    end_token = len(all_chars) + 1
-    mask_token = len(all_chars) + 2
-    char2num[bos_char] = start_token
-    char2num[eos_char] = end_token
-    char2num[mask_char] = mask_token
-    x = [torch.tensor(np.array([start_token] + [char2num[char] for char in sample] + [end_token])).to(device) for sample in x]
-    print('*** dataset size:', len(x))
-    print('*** vocabulary size:', len(char2num))
-    return x, char2num, mask_token
 
 ################################################
 # Algorithm 10
@@ -385,31 +316,34 @@ def EDTraining(transformer,
                target,
                nEpochs=10, 
                lrate=1e-4, 
-               saved_model_path='EDTraining_model.pth'):
+               model_path='EDTraining_model.pth'):
+    writer = SummaryWriter(f'{model_path}_train')
+    writer.add_graph(transformer, (source[0], target[0]))
+    running_loss = 0
     for epoch in tqdm(range(nEpochs)):
         for data_idx, (z, x) in tqdm(enumerate(zip(source, target))):     
             P = transformer(x, z)
-            loss = -torch.mean(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
-            if data_idx % 500 == 0:
-                print(f'Loss value at step {data_idx}: {loss.item()}')
-                print('P[x[1:x.shape[0]-1], range(x.shape[0] - 2)]', P[x[1:x.shape[0]-1], range(x.shape[0] - 2)])
-                print(f'Saving Model at epoch {epoch + 1}')
-                torch.save(transformer.state_dict(), saved_model_path)
+            loss = -torch.sum(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
+            running_loss += loss.item()         
             loss.backward()
             with torch.no_grad():
                 for param in transformer.parameters():
                     param -= lrate * param.grad
                 transformer.zero_grad()
+            if (data_idx + 1) % 500 == 0:
+                writer.add_scalar('Training loss', running_loss / 500., epoch * len(source) + data_idx + 1)
+                running_loss = 0
+                torch.save(transformer.state_dict(), model_path)
         indx = list(range(len(source)))
         random.shuffle(indx)
         source = [source[i] for i in indx]
         target = [target[i] for i in indx]
-        torch.save(transformer.state_dict(), saved_model_path)
+        torch.save(transformer.state_dict(), model_path)
 
 ################################################
 # Algorithm 12
 ################################################
-def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=0.5, saved_model_path='ETraining_model.pth'):
+def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=0.5, model_path='ETraining_model.pth'):
     for epoch in range(nEpochs):
         for data_idx, x in tqdm(enumerate(dataset)):
             mask_indices =  np.random.binomial(1, p_mask, x.shape[0])
@@ -420,8 +354,7 @@ def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=
             loss = -torch.mean(torch.log(P[x[mask_indices], mask_indices]))
             if data_idx % 500 == 0:
                 print(f'Loss value at step {data_idx}: {loss.item()}')    
-                print(f'Saving Model after epoch {epoch + 1}')
-                torch.save(eTransformer.state_dict(), saved_model_path)        
+                torch.save(eTransformer.state_dict(), model_path)        
             loss.backward()
             with torch.no_grad():
                 for param in eTransformer.parameters():
@@ -429,42 +362,46 @@ def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=
                 eTransformer.zero_grad()
         np.random.shuffle(dataset)
         print(f'Saving Model after epoch {epoch + 1}')
-        torch.save(eTransformer.state_dict(), saved_model_path)
+        torch.save(eTransformer.state_dict(), model_path)
 
 
 ################################################
 # Algorithm 13
 ################################################
-def DTraining(dTransformer, dataset, nEpochs=10, lrate=1e-4, saved_model_path='DTraining_model.pth'):
+def DTraining(dTransformer, dataset, nEpochs=10, lrate=1e-4, model_path='DTraining_model.pth'):
+    writer = SummaryWriter(f'{model_path}_train')
+    writer.add_graph(dTransformer, dataset[0])
+    running_loss = 0
     for epoch in tqdm(range(nEpochs)):
         for data_idx, x in tqdm(enumerate(dataset)):     
             P = dTransformer(x)
             loss = -torch.mean(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
-            if data_idx % 500 == 0:
-                print(f'Loss value at step {data_idx}: {loss.item()}')
-                print('P[x[1:x.shape[0]-1], range(x.shape[0] - 2)]', P[x[1:x.shape[0]-1], range(x.shape[0] - 2)])
-                print(f'Saving Model after epoch {epoch + 1}')
-                torch.save(dTransformer.state_dict(), saved_model_path)            
+            running_loss += loss.item()            
             loss.backward()
             with torch.no_grad():
                 for param in dTransformer.parameters():
                     param -= lrate * param.grad
                 dTransformer.zero_grad()
+            if (data_idx + 1) % 500 == 0:
+                writer.add_scalar('Training loss', running_loss / 500., epoch * len(dataset) + data_idx + 1)
+                running_loss = 0
+                torch.save(dTransformer.state_dict(), model_path)
         random.shuffle(dataset)      
-        torch.save(dTransformer.state_dict(), saved_model_path)
+        torch.save(dTransformer.state_dict(), model_path)
+    writer.close()
 
 
 ###############################################
 # Algorithm 14
 ###############################################
-def DInference(x, lgen, transformer, char2num):
+def DInference(x, lgen, transformer, t=1, max_len=20):
+    assert lgen > 0, f'lgen must be > 0, but got {lgen}.'
     l = x.shape[0]
-    y = torch.tensor([char2num['S']])
-    t = 1
-    for i in range(lgen):
-        P = transformer(x)
-        p = P[:, l + i - 1]
-        y = torch.tensor([np.random.choice(len(char2num), p=p.detach().numpy() ** (1 / t))])
+    for _ in range(lgen):
+        # use x[-(max_len - 1):] to handle sequences longer than max_len
+        P = transformer(x[-(max_len - 1):])
+        p = P[:, -1]
+        y = torch.multinomial(p ** (1 / t), num_samples=1)
         x = torch.cat([x, y])
     return x[l:]
 
@@ -472,14 +409,12 @@ def DInference(x, lgen, transformer, char2num):
 ################################################
 # Algorithm 15
 ################################################
-def EDInference(z, transformer, char2num):
-    x = torch.tensor([char2num[bos_char]], dtype=torch.int)
-    y = torch.tensor([char2num[bos_char]])
-    end_token = char2num[eos_char]
-    t = 1
-    while y[0] != end_token and len(x) < max_len:
+def EDInference(z, transformer, bos_token, eos_token, t=1, max_len=20):
+    x = torch.tensor([bos_token], dtype=torch.int)
+    y = torch.tensor([bos_token], dtype=torch.int)
+    while y[0] != eos_token and len(x) < max_len:
         P = transformer(x, z)
-        p = P[:, x.shape[0] - 1]
-        y = torch.tensor([np.random.choice(len(char2num), p=p.detach().numpy() ** (1 / t))])
+        p = P[:, -1]
+        y = torch.multinomial(p ** (1 / t), num_samples=1)
         x = torch.cat([x, y])
     return x
