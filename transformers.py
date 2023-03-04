@@ -344,6 +344,9 @@ def EDTraining(transformer,
 # Algorithm 12
 ################################################
 def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=0.5, model_path='ETraining_model.pth'):
+    writer = SummaryWriter(f'{model_path}_train')
+    writer.add_graph(eTransformer, dataset[0])
+    running_loss = 0
     for epoch in range(nEpochs):
         for data_idx, x in tqdm(enumerate(dataset)):
             mask_indices =  np.random.binomial(1, p_mask, x.shape[0])
@@ -351,15 +354,17 @@ def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=
             masked_x = x.clone().detach()
             masked_x[mask_indices] = mask_token
             P = eTransformer(masked_x)
-            loss = -torch.mean(torch.log(P[x[mask_indices], mask_indices]))
-            if data_idx % 500 == 0:
-                print(f'Loss value at step {data_idx}: {loss.item()}')    
-                torch.save(eTransformer.state_dict(), model_path)        
+            loss = -torch.sum(torch.log(P[x[mask_indices], mask_indices]))
+            running_loss += loss.item()
             loss.backward()
             with torch.no_grad():
                 for param in eTransformer.parameters():
                     param -= lrate * param.grad
                 eTransformer.zero_grad()
+            if (data_idx + 1) % 500 == 0:
+                writer.add_scalar('Training loss', running_loss / 500., epoch * len(dataset) + data_idx + 1)
+                running_loss = 0
+                torch.save(eTransformer.state_dict(), model_path)  
         np.random.shuffle(dataset)
         print(f'Saving Model after epoch {epoch + 1}')
         torch.save(eTransformer.state_dict(), model_path)
@@ -375,7 +380,7 @@ def DTraining(dTransformer, dataset, nEpochs=10, lrate=1e-4, model_path='DTraini
     for epoch in tqdm(range(nEpochs)):
         for data_idx, x in tqdm(enumerate(dataset)):     
             P = dTransformer(x)
-            loss = -torch.mean(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
+            loss = -torch.sum(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
             running_loss += loss.item()            
             loss.backward()
             with torch.no_grad():

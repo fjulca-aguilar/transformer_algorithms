@@ -68,10 +68,13 @@ def run_train(args):
         ds.load_book_dataset(max_len=args.max_len)
         if args.model_type == 'DTransformer':            
             transformer = DTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **DT_config)
-            DTraining(transformer, ds.x, lrate=args.lrate, nEpochs=args.nEpochs)
+            DTraining(transformer, ds.x, lrate=args.lrate, nEpochs=args.nEpochs,
+                      model_path=args.model_path)
         else:
-            transformer = ETransformer(Nv=len(char2num), lmax=args.max_len, **ET_config)
-            ETraining(transformer, book, lrate=args.lrate, mask_token=mask_token, nEpochs=args.nEpochs)
+            transformer = ETransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **ET_config)
+            ETraining(transformer, ds.x, lrate=args.lrate, 
+                      mask_token=ds.detokenize([ds.mask_char])[0], 
+                      nEpochs=args.nEpochs, model_path=args.model_path)
 
 
 def run_eval(args):
@@ -82,31 +85,24 @@ def run_eval(args):
         z = torch.tensor([ds.char2num[ds.bos_char]] + \
             ds.tokenize(args.source.lower()) + \
             [ds.char2num[ds.eos_char]])
-        # num2char = ['0'] * (len(char2num))
-        # for achar, num in char2num.items():
-        #     num2char[num] = achar
-
         transformer.load_state_dict(torch.load(args.model_path))
         transformer.eval()
         x = EDInference(z, transformer, ds.char2num[ds.bos_char], ds.char2num[ds.eos_char])
         print(f"Text in Spanish: {''.join(ds.detokenize(x.numpy()))}")
     elif args.model_type == 'DTransformer':
-        _, char2num, _ = load_book_dataset()
-        transformer = DTransformer(Nv=len(char2num), lmax=args.max_len, **DT_config)
-        x = torch.tensor([char2num[bos_char]] + \
-            [char2num[achar] for achar in args.prompt.lower()])
-        num2char = ['0'] * (len(char2num))
-        for achar, num in char2num.items():
-            num2char[num] = achar
-        transformer.load_state_dict(torch.load('DTraining_model.pth'))
+        ds.load_book_dataset()
+        transformer = DTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **DT_config)
+        x = torch.tensor(ds.tokenize(ds.bos_char + args.prompt.lower()))
+        transformer.load_state_dict(torch.load(args.model_path))
         transformer.eval()
         x = DInference(x, args.new_text_len, transformer)
-        print(f"Book text: {''.join([num2char[n]  for n in x])}")
+        print(f"New text: {''.join(ds.detokenize(x.numpy()))}")
     else:
         print('No eval/inference algorithm for ', args.model_type)
 
 
-# TODO: improve initialization, too much variance in between training experiments with same parameters right now.
+# TODO: improve initialization, too much variance 
+# in between training experiments with same parameters.
 if __name__ == '__main__':
     args = parser.parse_args()
     if args.mode == 'train':
