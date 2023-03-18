@@ -6,10 +6,11 @@ import matplotlib.pyplot as plt
 import math
 import random
 from torch.utils.tensorboard import SummaryWriter
+import os
 
 _eps = 1e-5
 dtype = torch.float
-# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = 'cuda' if torch.cuda.is_available() else 'cpu' # 'mps' 
 
 ################################################
 # Algorithm 4
@@ -24,7 +25,7 @@ class Attention(nn.Module):
         self.Wv = nn.Parameter(torch.randn((dout, dz), dtype=dtype) / math.sqrt(dout))
         self.bv = nn.Parameter(torch.zeros((dout, 1), dtype=dtype))
         self.dattn_sqrt = math.sqrt(dattn)
-        self.softmax = nn.Softmax(dim=0)
+        self.softmax = nn.Softmax(dim=-2)
 
     def forward(self, X, Z, mask=None):
         """
@@ -42,7 +43,7 @@ class Attention(nn.Module):
         k = self.Wk @ Z + self.bk
         v = self.Wv @ Z + self.bv # dout x lz 
         
-        score = k.T @ q # lz x lx        
+        score = k.transpose(-2, -1) @ q # lz x lx        
         if mask is not None:
             inf = 1000
             score = score.masked_fill(mask==0, -inf)
@@ -72,7 +73,7 @@ class MHAttention(nn.Module):
             tensor representation of X with Z as context.
         """
         Y = [attn(X, Z, mask) for attn in self.attention]
-        Y = torch.cat(Y, dim=0)
+        Y = torch.cat(Y, dim=-2)
         return self.Wo @ Y + self.bo
 
 
@@ -86,8 +87,8 @@ class Layer_norm(nn.Module):
         self.beta = torch.nn.Parameter(torch.zeros((de, 1), dtype=dtype)) if beta is None else beta
     
     def forward(self, e):
-        m = e.mean(dim=0, keepdim=True)
-        v = e.var(dim=0, keepdim=True)
+        m = e.mean(dim=-2, keepdim=True)
+        v = e.var(dim=-2, keepdim=True)
         return ((e - m) / torch.sqrt(v + _eps)) * self.lamb + self.beta
        
 ################################################
@@ -245,7 +246,7 @@ def positional_embedding(de, lmax):
     Wp = torch.zeros((de, lmax), dtype=dtype)
     Wp[1::2, :] = torch.sin(angles)
     Wp[::2, :] = torch.cos(angles)
-    return Wp
+    return Wp.to(device)
 
 def visualize_pos_embedding(Wp):
     plt.pcolormesh(Wp, cmap='RdBu')
@@ -294,18 +295,18 @@ class DTransformer(nn.Module):
             self.bmlps1.append(torch.nn.Parameter(torch.zeros((dmlp, 1), dtype=dtype)))
             self.bmlps2.append(torch.nn.Parameter(torch.zeros((de, 1), dtype=dtype)))
         self.gelu=nn.GELU()
-        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax), dtype=dtype)) > 0)
+        self.register_buffer("unidirectional_attention_mask", torch.triu(torch.ones((lmax, lmax), dtype=dtype)))
 
     def forward(self, x):
-        lx = x.shape[0]
-        X = self.We(x).transpose(1,0) + self.Wp[:, :lx]
+        lx = x.shape[-1]
+        X = self.We(x).transpose(-2,-1) + self.Wp[:, :lx]
         for l in range(self.L):
             X = self.first_layer_norms[l](X)
             X = X + self.mHeadAttentionLayers[l](X, X, self.unidirectional_attention_mask[:lx, :lx])
             X = self.second_layer_norms[l](X)
             X = X + self.Wmlps2[l] @ self.gelu(self.Wmlps1[l] @ X + self.bmlps1[l]) + self.bmlps2[l]
         X = self.third_layer_norm(X)
-        return nn.functional.softmax(self.Wu @ X, dim=0)
+        return nn.functional.softmax(self.Wu @ X, dim=-2)
 
 
 ################################################
@@ -323,7 +324,7 @@ def EDTraining(transformer,
     for epoch in tqdm(range(nEpochs)):
         for data_idx, (z, x) in tqdm(enumerate(zip(source, target))):     
             P = transformer(x, z)
-            loss = -torch.sum(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
+            loss = -torch.sum(torch.log(P[x[1:x.shape[0]], range(x.shape[0] - 1)]))
             running_loss += loss.item()         
             loss.backward()
             with torch.no_grad():
@@ -369,46 +370,62 @@ def ETraining(eTransformer, dataset, mask_token, nEpochs=10, lrate=1e-3, p_mask=
         print(f'Saving Model after epoch {epoch + 1}')
         torch.save(eTransformer.state_dict(), model_path)
 
+def log_loss(running_loss, batch_size, epoch, step, dataset_size, writer):
+    avg_loss = running_loss / (batch_size * (step + 1))
+    global_step = epoch * (dataset_size // batch_size) + step
+    print(f'Avg. training loss at global step={global_step}: {avg_loss}')
+    writer.add_scalar('Avg. training loss', avg_loss, global_step)
 
 ################################################
 # Algorithm 13
 ################################################
-def DTraining(dTransformer, dataset, nEpochs=10, lrate=1e-4, model_path='DTraining_model.pth'):
-    writer = SummaryWriter(f'{model_path}_train')
-    writer.add_graph(dTransformer, dataset[0])
+def DTraining(dTransformer, dataset, nEpochs=10, lrate=1e-4, model_path='DTraining_model.pth', batch_size = 10):
+    dTransformer.to(device)
+    writer = SummaryWriter(f'{os.path.splitext(model_path)[0]}_train')
+    writer.add_graph(dTransformer, dataset[0:1].to(device))
     running_loss = 0
+    lx = dataset.shape[1]    
+    batch_ix = np.array([[i] * (lx - 1) for i in range(batch_size)], dtype=int).flatten()
+    pos_ix = list(range(lx - 1)) * batch_size
     for epoch in tqdm(range(nEpochs)):
-        for data_idx, x in tqdm(enumerate(dataset)):     
+        for step, start_ix in tqdm(enumerate(range(0, dataset.shape[0], batch_size))):
+            x = dataset[start_ix: start_ix + batch_size].to(device)            
             P = dTransformer(x)
-            loss = -torch.sum(torch.log(torch.clip(P[x[1:x.shape[0]], range(x.shape[0] - 1)], 1e-9)))
-            running_loss += loss.item()            
+            loss = -torch.sum(torch.log(P[batch_ix, x[:, 1:].flatten(), pos_ix]))
+            running_loss += loss.item()
             loss.backward()
             with torch.no_grad():
                 for param in dTransformer.parameters():
                     param -= lrate * param.grad
                 dTransformer.zero_grad()
-            if (data_idx + 1) % 500 == 0:
-                writer.add_scalar('Training loss', running_loss / 500., epoch * len(dataset) + data_idx + 1)
-                running_loss = 0
+            if step % 100 == 0:
+                log_loss(running_loss, batch_size, epoch, step, dataset.shape[0], writer)                
                 torch.save(dTransformer.state_dict(), model_path)
-        random.shuffle(dataset)      
         torch.save(dTransformer.state_dict(), model_path)
+        running_loss = 0
+        random.shuffle(dataset)        
     writer.close()
 
 
 ###############################################
 # Algorithm 14
 ###############################################
-def DInference(x, lgen, transformer, t=1, max_len=20):
+def DInference(x, lgen, transformer, decoder, t=1, lmax=20):
     assert lgen > 0, f'lgen must be > 0, but got {lgen}.'
     l = x.shape[0]
+    x = x.to(device)
+    transformer.to(device)
+    print("New text: ", end="")
     for _ in range(lgen):
-        # use x[-(max_len - 1):] to handle sequences longer than max_len
-        P = transformer(x[-(max_len - 1):])
+        # add batch axis and 
+        # use x[:, -lmax:] to handle sequences longer than lmax
+        inp = x[None, -lmax:].to(device)
+        P = transformer(inp)[0]
         p = P[:, -1]
         y = torch.multinomial(p ** (1 / t), num_samples=1)
         x = torch.cat([x, y])
-    return x[l:]
+        print(decoder(y.numpy())[0], end="")
+    return x.numpy()[l:]
 
 
 ################################################

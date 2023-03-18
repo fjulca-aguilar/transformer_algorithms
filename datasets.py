@@ -54,19 +54,13 @@ class Dataset:
         all_chars = set(text)
         self.char2num = {char:num for num, char in enumerate(sorted(all_chars))}
         dataset_size = 10000
-
-        # use max_len - 2 to account for start and end token
-        start_ix = torch.randint(len(text) - (max_len - 2), (dataset_size,))
-        x = [text[ix:ix+(max_len - 2)] for ix in start_ix]
-        start_token = len(all_chars)
-        end_token = len(all_chars) + 1
-        mask_token = len(all_chars) + 2
-        self.char2num[self.bos_char] = start_token
-        self.char2num[self.eos_char] = end_token
+        start_ix = torch.randint(len(text) - max_len, (dataset_size,))
+        x = [text[ix:ix+max_len] for ix in start_ix]
+        mask_token = len(all_chars)
         self.char2num[self.mask_char] = mask_token
         self.num2char = {n:c for c, n in self.char2num.items()}
-        self.x = [torch.tensor(np.array([start_token] + self.tokenize(sample) + [end_token])) for sample in x]
-        print(f"*** Dataset size: {len(x)}. Vocabulary size: {len(self.char2num)}")
+        self.x = torch.stack([torch.tensor(self.tokenize(sample)) for sample in x])
+        print(f"*** Dataset size: {self.x.shape[0]}. Vocabulary size: {len(self.char2num)}")
         
 
     def tokenize(self, chars):

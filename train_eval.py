@@ -13,11 +13,14 @@ parser.add_argument('--lrate', type=float,
 parser.add_argument('--nEpochs', type=int,
                     default=3,
                     help='Number of training epochs.')
+parser.add_argument('--batch_size', type=int,
+                    default=16,
+                    help='Training batch size.')
 parser.add_argument('--model_path', type=str, default='EDTraining_model.pth',
                     help='Path to model to be saved during training or to be loaded during evaluation.')
 parser.add_argument('--source', type=str, default='Go.',
                     help='Source to be processed (translated) by EDTransformer.')
-parser.add_argument('--prompt', type=str, default='He had',
+parser.add_argument('--prompt', type=str, default='.',
                     help='Prompt to be processed (continued) by DTransformer.')
 parser.add_argument('--new_text_len', type=int,
                     default=10,
@@ -68,20 +71,25 @@ def run_train(args):
         ds.load_book_dataset(max_len=args.max_len)
         if args.model_type == 'DTransformer':            
             transformer = DTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **DT_config)
+            print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
             DTraining(transformer, ds.x, lrate=args.lrate, nEpochs=args.nEpochs,
-                      model_path=args.model_path)
+                      model_path=args.model_path, batch_size=args.batch_size)
         else:
             transformer = ETransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **ET_config)
+            print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
             ETraining(transformer, ds.x, lrate=args.lrate, 
                       mask_token=ds.detokenize([ds.mask_char])[0], 
                       nEpochs=args.nEpochs, model_path=args.model_path)
 
+def get_num_parameters(model):
+    return sum(p.numel() for p in model.parameters())
 
 def run_eval(args):
     ds = datasets.Dataset()
     if args.model_type == 'EDTransformer':
         ds.load_translation_dataset(max_len=args.max_len)
         transformer = EDTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **EDT_config)
+        print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
         z = torch.tensor([ds.char2num[ds.bos_char]] + \
             ds.tokenize(args.source.lower()) + \
             [ds.char2num[ds.eos_char]])
@@ -92,11 +100,11 @@ def run_eval(args):
     elif args.model_type == 'DTransformer':
         ds.load_book_dataset()
         transformer = DTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **DT_config)
-        x = torch.tensor(ds.tokenize(ds.bos_char + args.prompt.lower()))
+        print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
+        x = torch.tensor(ds.tokenize(args.prompt.lower()))
         transformer.load_state_dict(torch.load(args.model_path))
         transformer.eval()
-        x = DInference(x, args.new_text_len, transformer)
-        print(f"New text: {''.join(ds.detokenize(x.numpy()))}")
+        DInference(x, args.new_text_len, transformer, ds.detokenize, lmax=args.max_len)
     else:
         print('No eval/inference algorithm for ', args.model_type)
 
