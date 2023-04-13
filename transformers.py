@@ -104,7 +104,7 @@ class MHAttention(nn.Module):
 
 
 ################################################
-# Algorithm 6: EDTransformer
+# Algorithm 6:
 ################################################
 class Layer_norm(nn.Module):
     def __init__(self, de, beta=None):
