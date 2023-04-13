@@ -5,7 +5,7 @@ from transformers import *
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('--mode', type=str, default='train',
                     choices=['train', 'eval'])
-parser.add_argument('--model_type', type=str, default='EDTransformer',
+parser.add_argument('--model_type', type=str, default='DTransformer',
                     choices=['EDTransformer', 'DTransformer', 'ETransformer'])
 parser.add_argument('--lrate', type=float,
                     default=1e-3,
@@ -31,22 +31,29 @@ parser.add_argument('--max_len', type=int,
                     help='Max sequence lenght.')
 
 EDT_config ={
-    'Lenc': 2, 
-    'Ldec': 2, 
-    'H': 2, 
-    'de': 512, 
-    'dmlp': 2048, 
-    'dattn': 128, 
-    'dmid': 128
+    'Lenc': 3, 
+    'Ldec': 3, 
+    'H': 3, 
+    'de': 192, 
+    'dmlp': 768, 
+    'dattn': 32, 
+    'dmid': 32
 }
 
 DT_config ={
-    'L': 2, 
-    'H': 2, 
-    'de': 512, 
-    'dmlp': 2048, 
-    'dattn': 128, 
-    'dmid': 128
+    'L': 3, 
+    'H': 3, 
+    'de': 192, 
+    'dmlp': 768, # ~ 4x de
+    'dattn': 32, 
+    'dmid': 32
+    # larger model
+    # 'L': 6, 
+    # 'H': 6, 
+    # 'de': 384, 
+    # 'dmlp': 1536, # ~ 4x de
+    # 'dattn': 64, 
+    # 'dmid': 64
 }
 
 ET_config ={
@@ -78,7 +85,7 @@ def run_train(args):
             transformer = ETransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **ET_config)
             print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
             ETraining(transformer, ds.x, lrate=args.lrate, 
-                      mask_token=ds.detokenize([ds.mask_char])[0], 
+                      mask_token=ds.tokenize([ds.mask_char])[0], 
                       nEpochs=args.nEpochs, model_path=args.model_path)
 
 def get_num_parameters(model):
@@ -90,27 +97,25 @@ def run_eval(args):
         ds.load_translation_dataset(max_len=args.max_len)
         transformer = EDTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **EDT_config)
         print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
-        z = torch.tensor([ds.char2num[ds.bos_char]] + \
-            ds.tokenize(args.source.lower()) + \
+        z = torch.tensor([ds.char2num[ds.bos_char]] +
+            ds.tokenize(args.source) +
             [ds.char2num[ds.eos_char]])
-        transformer.load_state_dict(torch.load(args.model_path))
+        transformer.load_state_dict(torch.load(args.model_path, map_location=torch.device(device)))
         transformer.eval()
-        x = EDInference(z, transformer, ds.char2num[ds.bos_char], ds.char2num[ds.eos_char])
+        x = EDInference(z, transformer, ds.char2num[ds.bos_char], ds.char2num[ds.eos_char], lmax=args.max_len)
         print(f"Text in Spanish: {''.join(ds.detokenize(x.numpy()))}")
     elif args.model_type == 'DTransformer':
-        ds.load_book_dataset()
+        ds.load_book_dataset(max_len=args.max_len)
         transformer = DTransformer(Nv=ds.vocabulary_size(), lmax=args.max_len, **DT_config)
         print(f"Num. parameters (M): {get_num_parameters(transformer) / 1e6}")
-        x = torch.tensor(ds.tokenize(args.prompt.lower()))
-        transformer.load_state_dict(torch.load(args.model_path))
+        x = torch.tensor(ds.tokenize(args.prompt))
+        transformer.load_state_dict(torch.load(args.model_path, map_location=torch.device(device)))
         transformer.eval()
         DInference(x, args.new_text_len, transformer, ds.detokenize, lmax=args.max_len)
     else:
         print('No eval/inference algorithm for ', args.model_type)
 
 
-# TODO: improve initialization, too much variance 
-# in between training experiments with same parameters.
 if __name__ == '__main__':
     args = parser.parse_args()
     if args.mode == 'train':
